@@ -39,7 +39,7 @@ def _agg(df: pd.DataFrame) -> dict:
         return {"bets": 0, "hit_rate": None, "staked": 0, "returned": 0,
                 "roi_kelly": None, "roi_flat100": None}
     hit = df["ret"] > 0
-    unit_ret = (df["odds"] * 100).where(hit, 0)
+    unit_ret = (df["ret"] / df["stake"] * 100).fillna(0)
     return {
         "bets": int(len(df)),
         "hit_rate": round(float(hit.mean()), 3),
@@ -72,8 +72,7 @@ def api_summary():
             a = _agg(g)
             out["daily"].append({"date": d, **a})
             cum_kelly += a["returned"] - a["staked"]
-            hit = g["ret"] > 0
-            cum_flat += float(((g["odds"] * 100).where(hit, 0) - 100).sum())
+            cum_flat += float((g["ret"] / g["stake"] * 100 - 100).sum())
             out["equity"].append(
                 {"date": d, "kelly": cum_kelly, "flat": cum_flat})
     return jsonify(out)

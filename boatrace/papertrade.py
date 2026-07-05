@@ -214,8 +214,8 @@ def report() -> None:
         return
     df["date"] = df["race_id"].str[:10]
     df["hit"] = df["ret"] > 0
-    df["unit_ret"] = df.apply(
-        lambda r: r["odds"] * 100 if r["hit"] else 0, axis=1)
+    # 均一100円換算は投票時オッズではなく実際の確定払戻で計算する
+    df["unit_ret"] = (df["ret"] / df["stake"] * 100).fillna(0)
 
     def agg(g):
         return pd.Series({

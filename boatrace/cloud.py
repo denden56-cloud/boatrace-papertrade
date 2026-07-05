@@ -177,7 +177,8 @@ def _agg(df: pd.DataFrame) -> dict:
         return {"bets": 0, "hit_rate": None, "staked": 0, "returned": 0,
                 "roi_kelly": None, "roi_flat100": None}
     hit = df["ret"] > 0
-    unit = (df["odds"] * 100).where(hit, 0)
+    # 均一100円換算は投票時オッズではなく実際の確定払戻で計算する
+    unit = (df["ret"] / df["stake"] * 100).fillna(0)
     return {"bets": int(len(df)), "hit_rate": round(float(hit.mean()), 3),
             "staked": int(df["stake"].sum()), "returned": int(df["ret"].sum()),
             "roi_kelly": round(float(df["ret"].sum() / max(df["stake"].sum(), 1)), 3),
@@ -204,8 +205,7 @@ def dashboard() -> None:
             a = _agg(g)
             out["daily"].append({"date": d, **a})
             cum_k += a["returned"] - a["staked"]
-            hit = g["ret"] > 0
-            cum_f += float(((g["odds"] * 100).where(hit, 0) - 100).sum())
+            cum_f += float((g["ret"] / g["stake"] * 100 - 100).sum())
             out["equity"].append({"date": d, "kelly": round(cum_k),
                                   "flat": round(cum_f)})
     recent = bets.tail(200).iloc[::-1]
