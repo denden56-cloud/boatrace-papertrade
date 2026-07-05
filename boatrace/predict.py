@@ -45,7 +45,7 @@ def build_today(target: str) -> pd.DataFrame:
 
     hist = load_raw()
     hist = hist[hist["date"] < target]
-    for col in ("rank", "course", "st", "flying"):
+    for col in ("rank", "tenji", "course", "st", "flying"):
         today[col] = pd.NA
     combined = pd.concat([hist, today], ignore_index=True)
     combined["klass_num"] = combined["klass"].map(KLASS_MAP)

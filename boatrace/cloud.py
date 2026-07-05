@@ -25,6 +25,7 @@ import pandas as pd
 
 from .dataset import CATEGORICAL, FEATURES, KLASS_MAP, add_relative_features
 from .download import DATA_DIR, fetch_day
+from .odds import fetch_3tan_odds, fetch_beforeinfo, fetch_tansho_odds
 from .papertrade import _select_bets, _stake
 from .parse import parse_b_file, parse_k_file
 from .predict import ENTRY_COLS, RACE_COLS, VENUES
@@ -37,7 +38,9 @@ CHECKED_PATH = STATE_DIR / "checked.csv"
 DOCS = Path(__file__).resolve().parent.parent / "docs"
 
 BET_FIELDS = ["race_id", "bet_type", "combo", "p", "odds", "ev", "stake",
-              "placed_at", "ret", "settled_at"]
+              "placed_at", "ret", "settled_at", "final_odds"]
+# スタート展示の記録(履歴データが貯まれば将来の特徴量にする)
+BEFOREINFO_PATH = STATE_DIR / "beforeinfo.csv"
 
 # 締切がこの範囲内のレースを処理する(cron遅延があるため広めに取り、
 # checked.csv で二重処理を防ぐ)
@@ -49,9 +52,16 @@ def _now() -> datetime:
 
 
 def _load_bets() -> pd.DataFrame:
-    if BETS_PATH.exists():
-        return pd.read_csv(BETS_PATH, dtype={"combo": str})
-    return pd.DataFrame(columns=BET_FIELDS)
+    """bets.csv を読む。列追加前の古い行が混ざっていても耐える。"""
+    if not BETS_PATH.exists():
+        return pd.DataFrame(columns=BET_FIELDS)
+    with open(BETS_PATH, newline="", encoding="utf-8") as f:
+        rows = [r + [""] * (len(BET_FIELDS) - len(r))
+                for r in csv.reader(f)][1:]  # ヘッダは読み飛ばす
+    df = pd.DataFrame(rows, columns=BET_FIELDS)
+    for c in ("p", "odds", "ev", "stake", "ret", "final_odds"):
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df
 
 
 def _load_checked() -> set[str]:
@@ -70,7 +80,8 @@ def _append_checked(race_id: str, n_bets: int) -> None:
         w.writerow([race_id, _now().isoformat(timespec="seconds"), n_bets])
 
 
-def _predict_today(target: str) -> pd.DataFrame | None:
+def _base_today(target: str) -> pd.DataFrame | None:
+    """当日の出走表+特徴量(展示タイム以外)。"""
     d = datetime.strptime(target, "%Y-%m-%d").date()
     path = fetch_day("B", d, DATA_DIR / "B")
     if path is None:
@@ -79,22 +90,26 @@ def _predict_today(target: str) -> pd.DataFrame | None:
     df = pd.DataFrame(entries, columns=ENTRY_COLS).merge(
         pd.DataFrame(races, columns=RACE_COLS), on="race_id")
     df["klass_num"] = df["klass"].map(KLASS_MAP)
-    df = attach_features(df, load_stats())
-    df = add_relative_features(df)
+    df["tenji"] = float("nan")
+    return attach_features(df, load_stats())
 
-    with open(MODEL_PATH, "rb") as f:
-        model = pickle.load(f)["model"]
-    for c in CATEGORICAL:
-        df[c] = df[c].astype("category")
-    df["p_raw"] = model.predict(df[FEATURES])
-    df["p"] = df["p_raw"] / df.groupby("race_id")["p_raw"].transform("sum")
-    return df
+
+def _log_beforeinfo(rid: str, info: dict[int, dict]) -> None:
+    new = not BEFOREINFO_PATH.exists()
+    with open(BEFOREINFO_PATH, "a", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        if new:
+            w.writerow(["race_id", "lane", "tenji", "ex_course", "ex_st"])
+        for lane in sorted(info):
+            d = info[lane]
+            w.writerow([rid, lane, d.get("tenji", ""),
+                        d.get("ex_course", ""), d.get("ex_st", "")])
 
 
 def sweep() -> None:
     now = _now()
     target = now.strftime("%Y-%m-%d")
-    df = _predict_today(target)
+    df = _base_today(target)
     if df is None:
         print("番組表なし")
         return
@@ -108,10 +123,36 @@ def sweep() -> None:
         dl = datetime.strptime(f"{target} {top['deadline']}",
                                "%Y-%m-%d %H:%M").replace(tzinfo=JST)
         if now + timedelta(minutes=WINDOW_MIN) <= dl <= now + timedelta(minutes=WINDOW_MAX):
-            due.append((rid, race, top))
+            due.append((rid, top))
     print(f"{target} {now:%H:%M} 対象 {len(due)}レース")
+    if not due:
+        dashboard()
+        return
 
-    for rid, race, top in due:
+    # 対象レースの展示タイムを直前情報ページから取得して特徴量に反映
+    for rid, top in due:
+        try:
+            info = fetch_beforeinfo(int(top["jcd"]), int(top["rno"]), target)
+        except Exception as e:
+            print(f"beforeinfo NG {rid}: {e}")
+            continue
+        _log_beforeinfo(rid, info)
+        for lane, d in info.items():
+            if "tenji" in d:
+                df.loc[(df["race_id"] == rid) & (df["lane"] == lane),
+                       "tenji"] = d["tenji"]
+
+    df["tenji"] = pd.to_numeric(df["tenji"], errors="coerce")
+    df = add_relative_features(df)
+    with open(MODEL_PATH, "rb") as f:
+        model = pickle.load(f)["model"]
+    for c in CATEGORICAL:
+        df[c] = df[c].astype("category")
+    df["p_raw"] = model.predict(df[FEATURES])
+    df["p"] = df["p_raw"] / df.groupby("race_id")["p_raw"].transform("sum")
+
+    for rid, top in due:
+        race = df[df["race_id"] == rid]
         probs = {int(r.lane): r.p for r in race.itertuples()}
         try:
             bets = _select_bets(probs, int(top["jcd"]), int(top["rno"]), target)
@@ -127,11 +168,40 @@ def sweep() -> None:
                     w.writerow(BET_FIELDS)
                 for bt, combo, p, o in bets:
                     w.writerow([rid, bt, combo, round(p, 5), o,
-                                round(p * o, 4), _stake(p, o), ts, "", ""])
+                                round(p * o, 4), _stake(p, o), ts, "", "", ""])
                     print(f"[仮想] {VENUES.get(int(top['jcd']))}{top['rno']}R "
                           f"{bt} {combo} p={p:.1%} odds={o} EV={p*o:.2f}")
         _append_checked(rid, len(bets))
     dashboard()
+
+
+def _record_final_odds(bets: pd.DataFrame, day: str) -> None:
+    """確定オッズを記録する。投票時オッズとの乖離(オッズ変動リスク)の測定用。
+
+    公式サイトは過去レースのオッズページも確定値で残しているので、
+    仮想投票のあったレースだけ取得する。
+    """
+    mask = (bets["race_id"].str.startswith(day) & bets["final_odds"].isna()
+            & bets["ret"].notna())
+    for rid in bets.loc[mask, "race_id"].unique():
+        jcd, rno = int(rid[11:13]), int(rid[14:16])
+        rmask = mask & (bets["race_id"] == rid)
+        try:
+            if (bets.loc[rmask, "bet_type"] == "単勝").any():
+                t = fetch_tansho_odds(jcd, rno, day)
+                for i in bets.index[rmask & (bets["bet_type"] == "単勝")]:
+                    o = t.get(int(bets.loc[i, "combo"]))
+                    if o:
+                        bets.loc[i, "final_odds"] = o
+            if (bets.loc[rmask, "bet_type"] == "３連単").any():
+                s = fetch_3tan_odds(jcd, rno, day)
+                for i in bets.index[rmask & (bets["bet_type"] == "３連単")]:
+                    combo = tuple(int(x) for x in bets.loc[i, "combo"].split("-"))
+                    o = s.get(combo)
+                    if o:
+                        bets.loc[i, "final_odds"] = o
+        except Exception as e:
+            print(f"final odds NG {rid}: {e}")
 
 
 def settle() -> None:
@@ -166,6 +236,7 @@ def settle() -> None:
             bets.loc[i, "settled_at"] = ts
         stats = update_stats(stats, results)
         stats_updated = True
+        _record_final_odds(bets, day)
         print(f"{day}: 採点 {int(mask.sum())}件")
     bets.to_csv(BETS_PATH, index=False)
     if stats_updated:
@@ -216,6 +287,7 @@ def dashboard() -> None:
             "rno": int(b.race_id[14:16]), "bet_type": b.bet_type,
             "combo": b.combo, "p": b.p, "odds": b.odds, "ev": b.ev,
             "stake": int(b.stake),
+            "final_odds": None if pd.isna(b.final_odds) else float(b.final_odds),
             "ret": None if pd.isna(b.ret) else int(b.ret)})
     DOCS.mkdir(exist_ok=True)
     (DOCS / "data.json").write_text(

@@ -15,13 +15,15 @@ from .parse import DB_PATH
 
 KLASS_MAP = {"B2": 0, "B1": 1, "A2": 2, "A1": 3}
 
-# レース内で相対化する列(いずれもBファイルにある事前情報)
-REL_COLS = ["nat_win", "loc_win", "motor_2in", "boat_2in", "weight"]
+# レース内で相対化する列。Bファイルの事前情報+履歴集計+展示タイム
+# (展示は過去分がKファイル、当日分が公式の直前情報ページから取れる)
+REL_COLS = ["nat_win", "loc_win", "motor_2in", "boat_2in", "weight",
+            "klass_num", "racer_wr", "racer_st_mean", "racer_lane_wr", "tenji"]
 
 FEATURES = [
     "lane", "jcd", "klass_num", "age", "weight",
     "nat_win", "nat_2in", "loc_win", "loc_2in", "motor_2in", "boat_2in",
-    "racer_st_mean", "racer_lane_wr", "racer_wr", "racer_n",
+    "racer_st_mean", "racer_lane_wr", "racer_wr", "racer_n", "tenji",
     *[f"{c}_rank" for c in REL_COLS],
     *[f"{c}_z" for c in REL_COLS],
 ]
@@ -33,7 +35,7 @@ def load_raw(db_path: Path = DB_PATH) -> pd.DataFrame:
     df = pd.read_sql(
         """
         SELECT e.*, r.date, r.jcd, r.rno,
-               res.rank, res.course, res.st, res.flying
+               res.rank, res.tenji, res.course, res.st, res.flying
         FROM entries e
         JOIN races r USING (race_id)
         LEFT JOIN results res ON res.race_id = e.race_id AND res.lane = e.lane

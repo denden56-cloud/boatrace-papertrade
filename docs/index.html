@@ -34,7 +34,7 @@
  <section><h2>日別成績</h2><table id="daily"><thead><tr><th>日付</th><th>点数</th><th>的中率</th>
   <th>賭金計</th><th>払戻計</th><th>ROI(ケリー)</th><th>ROI(均一100円)</th></tr></thead><tbody></tbody></table></section>
  <section><h2>直近の仮想投票</h2><table id="recent"><thead><tr><th>日付</th><th>場</th><th>R</th>
-  <th>式別</th><th>買い目</th><th>予測確率</th><th>オッズ</th><th>EV</th><th>仮想賭金</th><th>払戻</th></tr></thead><tbody></tbody></table></section>
+  <th>式別</th><th>買い目</th><th>予測確率</th><th>オッズ</th><th>確定オッズ</th><th>EV</th><th>仮想賭金</th><th>払戻</th></tr></thead><tbody></tbody></table></section>
  <p class="muted">判断基準: 均一100円換算ROIが数百点以上のサンプルで安定して1.0を超えるまで実投票には移行しない。
   10分おきの自動巡回で締切3〜16分前のオッズを使用。GitHub Actionsで実行。</p>
 </main>
@@ -66,7 +66,8 @@ async function refresh(){
      roi(d.roi_kelly),roi(d.roi_flat100)]));
   fill("recent",s.recent.map(b=>
     [b.race_id.slice(0,10),b.venue,b.rno,b.bet_type,b.combo,pct(b.p),
-     b.odds.toFixed(1),b.ev.toFixed(2),num(b.stake),
+     b.odds.toFixed(1),b.final_odds==null?"-":b.final_odds.toFixed(1),
+     b.ev.toFixed(2),num(b.stake),
      b.ret==null?"未確定":num(b.ret)]));
   const data={labels:s.equity.map(e=>e.date),datasets:[
     {label:"ケリー配分",data:s.equity.map(e=>e.kelly),borderColor:"#12385e",tension:.2},

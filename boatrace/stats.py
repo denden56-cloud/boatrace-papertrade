@@ -55,7 +55,7 @@ def update_stats(stats: pd.DataFrame, results: list[tuple]) -> pd.DataFrame:
     """1日分の結果 (race_id, lane, regno, rank_raw, rank, course, st, flying)
     をスナップショットに加算する。冪等ではないので同じ日を二度足さないこと。
     """
-    for _, lane, regno, _, rank, _, st, _ in results:
+    for _, lane, regno, _, rank, _, _, st, _ in results:
         if regno not in stats.index:
             stats.loc[regno] = 0
         stats.loc[regno, "n"] += 1

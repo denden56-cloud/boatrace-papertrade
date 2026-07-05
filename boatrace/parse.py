@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS entries (
 );
 CREATE TABLE IF NOT EXISTS results (
     race_id TEXT, lane INTEGER, regno INTEGER,
-    rank_raw TEXT, rank INTEGER, course INTEGER, st REAL, flying INTEGER,
+    rank_raw TEXT, rank INTEGER, tenji REAL, course INTEGER, st REAL,
+    flying INTEGER,
     PRIMARY KEY (race_id, lane)
 );
 CREATE TABLE IF NOT EXISTS payouts (
@@ -112,15 +113,15 @@ COMBO_RE = re.compile(r"(\d(?:-\d){0,2})\s+(\d+)(?:\s+人気\s+(\d+))?")
 
 
 def _parse_result_tail(tail: str):
-    """→ (course, st, flying)。欠場等でデータがない艇は (None, None, 0)。"""
+    """→ (tenji, course, st, flying)。欠場等でデータがない艇は全てNone/0。"""
     t = tail.split()
     if len(t) < 4:
-        return None, None, 0
+        return None, None, None, 0
     # t = [motor, boat, 展示, 進入, ST, タイム...] 展示が数値でなければ欠場系
     try:
-        float(t[2])
+        tenji = float(t[2])
     except ValueError:
-        return None, None, 0
+        return None, None, None, 0
     course = int(t[3]) if t[3] in "123456" else None
     st = flying = None
     if len(t) >= 5:
@@ -136,7 +137,7 @@ def _parse_result_tail(tail: str):
                 st = float(stx)
             except ValueError:
                 st = None
-    return course, st, flying or 0
+    return tenji, course, st, flying or 0
 
 
 def parse_k_file(path: Path):
@@ -172,10 +173,10 @@ def parse_k_file(path: Path):
         m = K_RESULT_RE.match(line)
         if m:
             rank_raw = m.group(1).strip()
-            course, st, flying = _parse_result_tail(m.group(5))
+            tenji, course, st, flying = _parse_result_tail(m.group(5))
             results.append((rid, int(m.group(2)), int(m.group(3)), rank_raw,
                             int(rank_raw) if rank_raw.isdigit() else None,
-                            course, st, flying))
+                            tenji, course, st, flying))
             continue
         stripped = line.strip()
         matched_bt = next((bt for bt in BET_TYPES if stripped.startswith(bt)), None)
@@ -227,7 +228,7 @@ def build_db(db_path: Path = DB_PATH) -> None:
             "UPDATE races SET weather=?, wind_dir=?, wind_speed=?, wave=?"
             " WHERE race_id=?",
             [(w, wd, ws, wv, rid) for rid, w, wd, ws, wv in metas])
-        con.executemany("INSERT OR IGNORE INTO results VALUES (?,?,?,?,?,?,?,?)",
+        con.executemany("INSERT OR IGNORE INTO results VALUES (?,?,?,?,?,?,?,?,?)",
                         results)
         con.executemany("INSERT INTO payouts VALUES (?,?,?,?,?)", payouts)
         if i % 100 == 0:
