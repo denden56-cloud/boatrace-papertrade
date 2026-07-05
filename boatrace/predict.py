@@ -13,7 +13,8 @@ from datetime import datetime, timedelta
 
 import pandas as pd
 
-from .dataset import CATEGORICAL, FEATURES, KLASS_MAP, add_history, load_raw
+from .dataset import (CATEGORICAL, FEATURES, KLASS_MAP, add_history,
+                      add_relative_features, load_raw)
 from .download import DATA_DIR, fetch_day
 from .odds import fetch_3tan_odds, fetch_tansho_odds
 from .parse import parse_b_file
@@ -50,7 +51,7 @@ def build_today(target: str) -> pd.DataFrame:
     combined["klass_num"] = combined["klass"].map(KLASS_MAP)
     combined = add_history(combined)
     out = combined[combined["date"] == target].copy()
-    return out
+    return add_relative_features(out)
 
 
 def harville(p: dict[int, float]) -> dict[tuple[int, int, int], float]:

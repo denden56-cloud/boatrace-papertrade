@@ -15,10 +15,15 @@ from .parse import DB_PATH
 
 KLASS_MAP = {"B2": 0, "B1": 1, "A2": 2, "A1": 3}
 
+# レース内で相対化する列(いずれもBファイルにある事前情報)
+REL_COLS = ["nat_win", "loc_win", "motor_2in", "boat_2in", "weight"]
+
 FEATURES = [
     "lane", "jcd", "klass_num", "age", "weight",
     "nat_win", "nat_2in", "loc_win", "loc_2in", "motor_2in", "boat_2in",
     "racer_st_mean", "racer_lane_wr", "racer_wr", "racer_n",
+    *[f"{c}_rank" for c in REL_COLS],
+    *[f"{c}_z" for c in REL_COLS],
 ]
 CATEGORICAL = ["lane", "jcd"]
 
@@ -67,10 +72,26 @@ def add_history(df: pd.DataFrame) -> pd.DataFrame:
     return df.sort_values(["date", "jcd", "rno", "lane"]).reset_index(drop=True)
 
 
+def add_relative_features(df: pd.DataFrame) -> pd.DataFrame:
+    """レース内での相対位置(6艇中の強さ)。
+
+    同じ勝率でも他艇の顔ぶれで意味が変わるので、絶対値に加えて
+    レース内順位(rank, 1=最上位)と標準化値(z)を持たせる。
+    Bファイルの事前情報だけで計算でき、学習時も予測時も同一に得られる。
+    """
+    g = df.groupby("race_id")
+    for col in REL_COLS:
+        df[f"{col}_rank"] = g[col].rank(ascending=False, method="min")
+        mean, std = g[col].transform("mean"), g[col].transform("std")
+        df[f"{col}_z"] = ((df[col] - mean) / std).fillna(0.0)
+    return df
+
+
 def build_dataset(db_path: Path = DB_PATH) -> pd.DataFrame:
     df = load_raw(db_path)
     df["klass_num"] = df["klass"].map(KLASS_MAP)
     df = add_history(df)
+    df = add_relative_features(df)
     df["win"] = (df["rank"] == 1).astype(int)
     # 結果ファイルが無い(未開催/取得漏れ)レースは学習から外す
     has_result = df.groupby("race_id")["rank"].transform(lambda x: x.notna().any())

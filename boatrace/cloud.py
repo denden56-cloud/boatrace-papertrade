@@ -23,7 +23,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from .dataset import CATEGORICAL, FEATURES, KLASS_MAP
+from .dataset import CATEGORICAL, FEATURES, KLASS_MAP, add_relative_features
 from .download import DATA_DIR, fetch_day
 from .papertrade import _select_bets, _stake
 from .parse import parse_b_file, parse_k_file
@@ -80,6 +80,7 @@ def _predict_today(target: str) -> pd.DataFrame | None:
         pd.DataFrame(races, columns=RACE_COLS), on="race_id")
     df["klass_num"] = df["klass"].map(KLASS_MAP)
     df = attach_features(df, load_stats())
+    df = add_relative_features(df)
 
     with open(MODEL_PATH, "rb") as f:
         model = pickle.load(f)["model"]
