@@ -1,0 +1,7 @@
+requests
+lhafile
+pandas
+numpy
+scikit-learn
+lightgbm
+beautifulsoup4

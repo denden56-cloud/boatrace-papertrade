@@ -1,0 +1,37 @@
+name: sweep
+# 開催時間(JST 8:00-23:00)に10分おきに起動し、締切直前レースの
+# オッズを取得して仮想投票を記録する。実際の投票は行わない。
+on:
+  schedule:
+    - cron: "*/10 0-13,23 * * *"  # UTC → JST 8:00-22:59
+  workflow_dispatch:
+
+concurrency:
+  group: state
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python -m boatrace.cloud sweep
+      - name: commit state
+        run: |
+          git config user.name "papertrade-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add state docs
+          if ! git diff --cached --quiet; then
+            git commit -m "sweep $(TZ=Asia/Tokyo date +%F_%H:%M)"
+            git pull --rebase origin main
+            git push
+          fi

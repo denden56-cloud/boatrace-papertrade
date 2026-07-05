@@ -1,0 +1,78 @@
+<!doctype html><html lang="ja"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>競艇ペーパートレード検証</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<style>
+ body{font-family:"Yu Gothic UI","Hiragino Sans",sans-serif;margin:0;background:#f4f6f8;color:#1a2733}
+ header{background:#12385e;color:#fff;padding:14px 20px;display:flex;flex-wrap:wrap;align-items:center;gap:12px}
+ header h1{font-size:17px;margin:0}
+ .safe{background:#1d7a4f;font-size:12px;padding:4px 10px;border-radius:12px}
+ .muted{color:#61707d;font-size:12px}
+ header .muted{color:#b8c7d4;margin-left:auto}
+ main{max-width:1100px;margin:18px auto;padding:0 14px;display:grid;gap:14px}
+ .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+ .card{background:#fff;border-radius:8px;padding:12px;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+ .card .k{font-size:12px;color:#61707d}.card .v{font-size:21px;font-weight:600;margin-top:4px}
+ .card .v.pos{color:#1d7a4f}.card .v.neg{color:#b3362a}
+ section{background:#fff;border-radius:8px;padding:14px;box-shadow:0 1px 3px rgba(0,0,0,.08);overflow-x:auto}
+ h2{font-size:14px;margin:0 0 10px;color:#12385e}
+ table{border-collapse:collapse;width:100%;font-size:13px;white-space:nowrap}
+ th,td{padding:5px 8px;text-align:right;border-bottom:1px solid #e5eaee}
+ th:first-child,td:first-child{text-align:left}
+ thead th{color:#61707d;font-weight:600}
+</style></head><body>
+<header><h1>競艇ペーパートレード検証</h1>
+ <span class="safe">仮想投票のみ — 実際の金銭は動きません</span>
+ <span class="muted" id="updated"></span></header>
+<main>
+ <div class="cards" id="cards"></div>
+ <section><h2>累積損益(仮想円)</h2><canvas id="equity" height="90"></canvas></section>
+ <section><h2>式別成績</h2><table id="bytype"><thead><tr><th>式別</th><th>点数</th><th>的中率</th>
+  <th>ROI(ケリー)</th><th>ROI(均一100円)</th></tr></thead><tbody></tbody></table></section>
+ <section><h2>EV帯別成績</h2><table id="byev"><thead><tr><th>EV帯</th><th>点数</th><th>的中率</th>
+  <th>ROI(ケリー)</th><th>ROI(均一100円)</th></tr></thead><tbody></tbody></table></section>
+ <section><h2>日別成績</h2><table id="daily"><thead><tr><th>日付</th><th>点数</th><th>的中率</th>
+  <th>賭金計</th><th>払戻計</th><th>ROI(ケリー)</th><th>ROI(均一100円)</th></tr></thead><tbody></tbody></table></section>
+ <section><h2>直近の仮想投票</h2><table id="recent"><thead><tr><th>日付</th><th>場</th><th>R</th>
+  <th>式別</th><th>買い目</th><th>予測確率</th><th>オッズ</th><th>EV</th><th>仮想賭金</th><th>払戻</th></tr></thead><tbody></tbody></table></section>
+ <p class="muted">判断基準: 均一100円換算ROIが数百点以上のサンプルで安定して1.0を超えるまで実投票には移行しない。
+  10分おきの自動巡回で締切3〜16分前のオッズを使用。GitHub Actionsで実行。</p>
+</main>
+<script>
+const pct=v=>v==null?"-":(v*100).toFixed(1)+"%";
+const num=v=>v==null?"-":v.toLocaleString();
+const roi=v=>v==null?"-":v.toFixed(3);
+function fill(id,rows){document.querySelector(`#${id} tbody`).innerHTML=
+  rows.length?rows.map(r=>`<tr>${r.map(c=>`<td>${c}</td>`).join("")}</tr>`).join("")
+  :`<tr><td colspan="10" class="muted">データなし</td></tr>`;}
+async function refresh(){
+  const s=await (await fetch("data.json?"+Date.now())).json();
+  document.getElementById("updated").textContent=`更新: ${s.updated_at}`;
+  const t=s.total;
+  document.getElementById("cards").innerHTML=[
+    ["採点済み点数",num(t.bets)],["的中率",pct(t.hit_rate)],
+    ["ROI(ケリー配分)",roi(t.roi_kelly),t.roi_kelly==null?null:t.roi_kelly-1],
+    ["ROI(均一100円)",roi(t.roi_flat100),t.roi_flat100==null?null:t.roi_flat100-1],
+    ["損益(仮想円)",num(t.returned-t.staked),t.returned-t.staked],
+    ["未採点",num(s.unsettled)],
+  ].map(([k,v,c])=>`<div class="card"><div class="k">${k}</div>
+    <div class="v ${c==null?"":(c>=0?"pos":"neg")}">${v}</div></div>`).join("");
+  fill("bytype",Object.entries(s.by_type).map(([k,a])=>
+    [k,a.bets,pct(a.hit_rate),roi(a.roi_kelly),roi(a.roi_flat100)]));
+  fill("byev",Object.entries(s.by_ev).map(([k,a])=>
+    [k,a.bets,pct(a.hit_rate),roi(a.roi_kelly),roi(a.roi_flat100)]));
+  fill("daily",s.daily.map(d=>
+    [d.date,d.bets,pct(d.hit_rate),num(d.staked),num(d.returned),
+     roi(d.roi_kelly),roi(d.roi_flat100)]));
+  fill("recent",s.recent.map(b=>
+    [b.race_id.slice(0,10),b.venue,b.rno,b.bet_type,b.combo,pct(b.p),
+     b.odds.toFixed(1),b.ev.toFixed(2),num(b.stake),
+     b.ret==null?"未確定":num(b.ret)]));
+  const data={labels:s.equity.map(e=>e.date),datasets:[
+    {label:"ケリー配分",data:s.equity.map(e=>e.kelly),borderColor:"#12385e",tension:.2},
+    {label:"均一100円",data:s.equity.map(e=>e.flat),borderColor:"#1d7a4f",tension:.2}]};
+  new Chart(document.getElementById("equity"),
+    {type:"line",data,options:{animation:false,plugins:{legend:{position:"bottom"}}}});
+}
+refresh();
+</script></body></html>
