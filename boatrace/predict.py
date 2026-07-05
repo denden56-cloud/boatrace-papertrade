@@ -6,7 +6,6 @@
 """
 
 import argparse
-import itertools
 import pickle
 from datetime import date as date_cls
 from datetime import datetime, timedelta
@@ -17,6 +16,7 @@ from .dataset import (CATEGORICAL, FEATURES, KLASS_MAP, add_history,
                       add_relative_features, load_raw)
 from .download import DATA_DIR, fetch_day
 from .odds import fetch_3tan_odds, fetch_tansho_odds
+from .ordermodel import trifecta_probs
 from .parse import parse_b_file
 from .train import MODEL_PATH, normalize_by_race
 
@@ -54,22 +54,6 @@ def build_today(target: str) -> pd.DataFrame:
     return add_relative_features(out)
 
 
-def harville(p: dict[int, float]) -> dict[tuple[int, int, int], float]:
-    """勝率から3連単の各並びの確率を組み立てる(Harville近似)。
-
-    競艇はイン有利の構造があるため厳密には成り立たないが、
-    1次近似としては実用になる。過信しないこと。
-    """
-    out = {}
-    for i, j, k in itertools.permutations(p, 3):
-        d1 = 1 - p[i]
-        d2 = 1 - p[i] - p[j]
-        if d1 <= 0 or d2 <= 0:
-            continue
-        out[(i, j, k)] = p[i] * p[j] / d1 * p[k] / d2
-    return out
-
-
 def predict_day(target: str, jcd: int | None, with_odds: bool,
                 ev_min: float, kelly_frac: float, bankroll: int) -> None:
     df = build_today(target)
@@ -81,6 +65,8 @@ def predict_day(target: str, jcd: int | None, with_odds: bool,
     with open(MODEL_PATH, "rb") as f:
         bundle = pickle.load(f)
     model = bundle["model"]
+    lam2 = bundle.get("lambda2", 1.0)
+    lam3 = bundle.get("lambda3", 1.0)
     for c in CATEGORICAL:
         df[c] = df[c].astype("category")
     df["p_raw"] = model.predict(df[FEATURES])
@@ -112,11 +98,10 @@ def predict_day(target: str, jcd: int | None, with_odds: bool,
             if o and o > 1 and p_ * o >= ev_min:
                 recs.append((jname, rn, deadline, f"単勝 {lane}", p_, o, p_ * o))
 
-        # Harville近似は人気薄の並びを過大評価するので、3連単は
-        # 確率5%以上の並びに限定し、1レースあたり上位3点まで
+        # 3連単は確率5%以上の並びに限定し、1レースあたり上位3点まで
         s_odds = fetch_3tan_odds(jn, rn, target)
         cands = []
-        for combo, p_ in harville(probs).items():
+        for combo, p_ in trifecta_probs(probs, lam2, lam3).items():
             o = s_odds.get(combo)
             if o and o > 1 and p_ >= 0.05 and p_ * o >= ev_min:
                 cands.append((jname, rn, deadline,

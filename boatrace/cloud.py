@@ -26,7 +26,7 @@ import pandas as pd
 from .dataset import CATEGORICAL, FEATURES, KLASS_MAP, add_relative_features
 from .download import DATA_DIR, fetch_day
 from .odds import fetch_3tan_odds, fetch_beforeinfo, fetch_tansho_odds
-from .papertrade import _select_bets, _stake
+from .papertrade import _stake, select_from_odds
 from .parse import parse_b_file, parse_k_file
 from .predict import ENTRY_COLS, RACE_COLS, VENUES
 from .stats import STATE_DIR, attach_features, load_stats, save_stats, update_stats
@@ -41,6 +41,9 @@ BET_FIELDS = ["race_id", "bet_type", "combo", "p", "odds", "ev", "stake",
               "placed_at", "ret", "settled_at", "final_odds"]
 # スタート展示の記録(履歴データが貯まれば将来の特徴量にする)
 BEFOREINFO_PATH = STATE_DIR / "beforeinfo.csv"
+# オッズ履歴(月別)。live=締切直前(投票判断時)、final=確定
+# 賭けの有無に関わらず全対象レースを記録し、EV戦略のバックテストを可能にする
+ODDS_DIR = STATE_DIR / "odds"
 
 # 締切がこの範囲内のレースを処理する(cron遅延があるため広めに取り、
 # checked.csv で二重処理を防ぐ)
@@ -94,6 +97,29 @@ def _base_today(target: str) -> pd.DataFrame | None:
     return attach_features(df, load_stats())
 
 
+import itertools
+
+PERMS = list(itertools.permutations(range(1, 7), 3))
+ODDS_FIELDS = (["phase", "race_id", "fetched_at"]
+               + [f"t{i}" for i in range(1, 7)]
+               + [f"s{a}{b}{c}" for a, b, c in PERMS])
+
+
+def archive_odds(phase: str, rid: str, t_odds: dict, s_odds: dict) -> None:
+    """1レース分のオッズを月別CSVに1行で追記する。"""
+    ODDS_DIR.mkdir(parents=True, exist_ok=True)
+    path = ODDS_DIR / f"{rid[:7]}.csv"
+    new = not path.exists()
+    row = [phase, rid, _now().isoformat(timespec="seconds")]
+    row += [t_odds.get(i, "") for i in range(1, 7)]
+    row += [s_odds.get(p, "") for p in PERMS]
+    with open(path, "a", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        if new:
+            w.writerow(ODDS_FIELDS)
+        w.writerow(row)
+
+
 def _log_beforeinfo(rid: str, info: dict[int, dict]) -> None:
     new = not BEFOREINFO_PATH.exists()
     with open(BEFOREINFO_PATH, "a", newline="", encoding="utf-8") as f:
@@ -145,7 +171,10 @@ def sweep() -> None:
     df["tenji"] = pd.to_numeric(df["tenji"], errors="coerce")
     df = add_relative_features(df)
     with open(MODEL_PATH, "rb") as f:
-        model = pickle.load(f)["model"]
+        bundle = pickle.load(f)
+    model = bundle["model"]
+    lam2 = bundle.get("lambda2", 1.0)
+    lam3 = bundle.get("lambda3", 1.0)
     for c in CATEGORICAL:
         df[c] = df[c].astype("category")
     df["p_raw"] = model.predict(df[FEATURES])
@@ -155,7 +184,10 @@ def sweep() -> None:
         race = df[df["race_id"] == rid]
         probs = {int(r.lane): r.p for r in race.itertuples()}
         try:
-            bets = _select_bets(probs, int(top["jcd"]), int(top["rno"]), target)
+            t_odds = fetch_tansho_odds(int(top["jcd"]), int(top["rno"]), target)
+            s_odds = fetch_3tan_odds(int(top["jcd"]), int(top["rno"]), target)
+            archive_odds("live", rid, t_odds, s_odds)
+            bets = select_from_odds(probs, t_odds, s_odds, lam2, lam3)
         except Exception as e:
             print(f"NG {rid}: {e}")
             continue
@@ -175,53 +207,61 @@ def sweep() -> None:
     dashboard()
 
 
-def _record_final_odds(bets: pd.DataFrame, day: str) -> None:
-    """確定オッズを記録する。投票時オッズとの乖離(オッズ変動リスク)の測定用。
+def _archive_final_odds(bets: pd.DataFrame, day: str,
+                        race_ids: set[str]) -> None:
+    """全レースの確定オッズをアーカイブし、仮想投票分のfinal_odds列も埋める。
 
-    公式サイトは過去レースのオッズページも確定値で残しているので、
-    仮想投票のあったレースだけ取得する。
+    公式サイトは過去レースのオッズページも確定値で残している。
+    賭けの有無に関わらず全レースを記録するのは、EV戦略そのものを
+    後からバックテストできるようにするため。
     """
-    mask = (bets["race_id"].str.startswith(day) & bets["final_odds"].isna()
-            & bets["ret"].notna())
-    for rid in bets.loc[mask, "race_id"].unique():
+    done = set()
+    path = ODDS_DIR / f"{day[:7]}.csv"
+    if path.exists():
+        with open(path, newline="", encoding="utf-8") as f:
+            done = {r[1] for r in csv.reader(f) if r and r[0] == "final"}
+    for rid in sorted(race_ids - done):
         jcd, rno = int(rid[11:13]), int(rid[14:16])
-        rmask = mask & (bets["race_id"] == rid)
         try:
-            if (bets.loc[rmask, "bet_type"] == "単勝").any():
-                t = fetch_tansho_odds(jcd, rno, day)
-                for i in bets.index[rmask & (bets["bet_type"] == "単勝")]:
-                    o = t.get(int(bets.loc[i, "combo"]))
-                    if o:
-                        bets.loc[i, "final_odds"] = o
-            if (bets.loc[rmask, "bet_type"] == "３連単").any():
-                s = fetch_3tan_odds(jcd, rno, day)
-                for i in bets.index[rmask & (bets["bet_type"] == "３連単")]:
-                    combo = tuple(int(x) for x in bets.loc[i, "combo"].split("-"))
-                    o = s.get(combo)
-                    if o:
-                        bets.loc[i, "final_odds"] = o
+            t = fetch_tansho_odds(jcd, rno, day)
+            s = fetch_3tan_odds(jcd, rno, day)
         except Exception as e:
             print(f"final odds NG {rid}: {e}")
+            continue
+        archive_odds("final", rid, t, s)
+        rmask = (bets["race_id"] == rid) & bets["final_odds"].isna()
+        for i in bets.index[rmask]:
+            if bets.loc[i, "bet_type"] == "単勝":
+                o = t.get(int(bets.loc[i, "combo"]))
+            else:
+                o = s.get(tuple(int(x) for x in bets.loc[i, "combo"].split("-")))
+            if o:
+                bets.loc[i, "final_odds"] = o
+
+
+STATS_DATE_PATH = STATE_DIR / "stats_date.txt"
 
 
 def settle() -> None:
+    """前回処理日の翌日から昨日までを日次で処理する。
+
+    投票の有無に関わらず毎日、(1)仮想投票の採点 (2)選手統計の更新
+    (3)確定オッズの全レースアーカイブ を行う。統計の欠落を防ぐため
+    処理済み日付は stats_date.txt で管理する。
+    """
     bets = _load_bets()
-    if bets.empty:
-        dashboard()
-        return
-    unsettled_days = sorted({rid[:10] for rid in
-                             bets.loc[bets["ret"].isna(), "race_id"]})
     today = _now().strftime("%Y-%m-%d")
     stats = load_stats()
-    stats_updated = False
-    for day in unsettled_days:
-        if day >= today:  # 当日分はまだ結果が出ていない
-            continue
-        d = datetime.strptime(day, "%Y-%m-%d").date()
+    last = (STATS_DATE_PATH.read_text().strip() if STATS_DATE_PATH.exists()
+            else (_now() - timedelta(days=2)).strftime("%Y-%m-%d"))
+    d = datetime.strptime(last, "%Y-%m-%d").date() + timedelta(days=1)
+    changed = False
+    while d.isoformat() < today:
+        day = d.isoformat()
         path = fetch_day("K", d, DATA_DIR / "K")
         if path is None:
-            print(f"{day} の結果が未公開")
-            continue
+            print(f"{day} の結果が未公開。次回に持ち越し")
+            break  # 日付順を保つためここで打ち切る
         _, results, payouts = parse_k_file(path)
         paytable = {(rid, bt, combo): amount for rid, bt, combo, amount, _ in payouts}
         resolved = {r[0] for r in results}
@@ -230,16 +270,20 @@ def settle() -> None:
         for i in bets.index[mask]:
             b = bets.loc[i]
             if b["race_id"] not in resolved:
-                continue  # レース中止等。次回また見る
+                bets.loc[i, "ret"] = int(b["stake"])  # レース中止=返還扱い
+                bets.loc[i, "settled_at"] = ts
+                continue
             amount = paytable.get((b["race_id"], b["bet_type"], b["combo"]), 0)
             bets.loc[i, "ret"] = int(b["stake"]) * amount // 100
             bets.loc[i, "settled_at"] = ts
         stats = update_stats(stats, results)
-        stats_updated = True
-        _record_final_odds(bets, day)
-        print(f"{day}: 採点 {int(mask.sum())}件")
+        _archive_final_odds(bets, day, resolved)
+        STATS_DATE_PATH.write_text(day)
+        changed = True
+        print(f"{day}: 採点 {int(mask.sum())}件 / 確定オッズ {len(resolved)}レース")
+        d += timedelta(days=1)
     bets.to_csv(BETS_PATH, index=False)
-    if stats_updated:
+    if changed:
         save_stats(stats)
     dashboard()
 
@@ -247,14 +291,20 @@ def settle() -> None:
 def _agg(df: pd.DataFrame) -> dict:
     if df.empty:
         return {"bets": 0, "hit_rate": None, "staked": 0, "returned": 0,
-                "roi_kelly": None, "roi_flat100": None}
+                "roi_kelly": None, "roi_flat100": None, "clv": None}
     hit = df["ret"] > 0
     # 均一100円換算は投票時オッズではなく実際の確定払戻で計算する
     unit = (df["ret"] / df["stake"] * 100).fillna(0)
+    # CLV: 投票時オッズが確定オッズよりどれだけ有利だったか。
+    # 系統的にプラスなら「締切までに賢い金が同じ方向に動いている」=エッジの先行指標
+    wf = df[df["final_odds"].notna() & (df["final_odds"] > 0)]
+    clv = (round(float((wf["odds"] / wf["final_odds"]).mean() - 1), 4)
+           if len(wf) else None)
     return {"bets": int(len(df)), "hit_rate": round(float(hit.mean()), 3),
             "staked": int(df["stake"].sum()), "returned": int(df["ret"].sum()),
             "roi_kelly": round(float(df["ret"].sum() / max(df["stake"].sum(), 1)), 3),
-            "roi_flat100": round(float(unit.sum() / (100 * len(df))), 3)}
+            "roi_flat100": round(float(unit.sum() / (100 * len(df))), 3),
+            "clv": clv}
 
 
 def dashboard() -> None:

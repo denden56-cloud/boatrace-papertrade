@@ -57,6 +57,15 @@ def train(df: pd.DataFrame | None = None, save: bool = True):
     te["p_raw"] = model.predict(te[FEATURES])
     te["p"] = normalize_by_race(te, "p_raw")
 
+    # 検証データで着順モデルのλをフィット(テストには触れない)
+    from .ordermodel import fit_lambdas
+    va = va.copy()
+    va["p_raw"] = model.predict(va[FEATURES])
+    va["p"] = normalize_by_race(va, "p_raw")
+    lam2, lam3 = fit_lambdas(va)
+    print(f"\n着順モデル: λ2={lam2:.2f} λ3={lam3:.2f} (1.0=Harville)")
+    _eval_trifecta(te, lam2, lam3)
+
     print(f"\nbest_iteration: {model.best_iteration}")
     print(f"test logloss (raw): {log_loss(te['win'], te['p_raw']):.4f}")
     print(f"test logloss (normalized): {log_loss(te['win'], te['p']):.4f}")
@@ -74,9 +83,33 @@ def train(df: pd.DataFrame | None = None, save: bool = True):
     if save:
         MODEL_PATH.parent.mkdir(exist_ok=True)
         with open(MODEL_PATH, "wb") as f:
-            pickle.dump({"model": model, "features": FEATURES}, f)
+            pickle.dump({"model": model, "features": FEATURES,
+                         "lambda2": lam2, "lambda3": lam3}, f)
         print(f"\nsaved: {MODEL_PATH}")
     return model, te
+
+
+def _eval_trifecta(te: pd.DataFrame, lam2: float, lam3: float) -> None:
+    """テスト期間の実際の3連単に対する平均対数尤度でHarvilleと比較する。"""
+    from .ordermodel import fit_lambdas, trifecta_probs
+    _ = fit_lambdas  # 明示: λはvalidでフィット済み
+    lls = {"harville": [], "benter": []}
+    for _, g in te.groupby("race_id"):
+        ranks = g.set_index("lane")["rank"]
+        p = g.set_index("lane")["p"].to_dict()
+        try:
+            combo = (int(ranks[ranks == 1].index[0]),
+                     int(ranks[ranks == 2].index[0]),
+                     int(ranks[ranks == 3].index[0]))
+        except IndexError:
+            continue
+        h = trifecta_probs(p, 1.0, 1.0).get(combo)
+        b = trifecta_probs(p, lam2, lam3).get(combo)
+        if h and b:
+            lls["harville"].append(np.log(h))
+            lls["benter"].append(np.log(b))
+    print(f"3連単 平均LL: Harville {np.mean(lls['harville']):.4f} → "
+          f"Benter {np.mean(lls['benter']):.4f} (高いほど良い, n={len(lls['benter'])})")
 
 
 if __name__ == "__main__":

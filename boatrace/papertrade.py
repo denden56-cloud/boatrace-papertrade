@@ -56,27 +56,40 @@ def _stake(p: float, o: float) -> int:
     return int(max(kelly * KELLY_FRAC, 0) * VIRTUAL_BANKROLL // 100 * 100)
 
 
-def _select_bets(probs: dict[int, float], jcd: int, rno: int, target: str):
-    """締切直前オッズを取得してEVプラスの買い目を返す。"""
-    from .predict import harville
+# 高オッズ帯のEVはモデル確率のノイズが増幅された幻が多いので上限を切る
+MAX_ODDS_TANSHO = 15.0
+MAX_ODDS_3TAN = 60.0
+
+
+def select_from_odds(probs: dict[int, float], t_odds: dict, s_odds: dict,
+                     lam2: float = 1.0, lam3: float = 1.0):
+    """取得済みオッズからEVプラスの買い目を選ぶ(通信しない純粋関数)。"""
+    from .ordermodel import trifecta_probs
 
     bets = []
-    t_odds = fetch_tansho_odds(jcd, rno, target)
     for lane, p in probs.items():
         o = t_odds.get(lane)
-        if o and o > 1 and p * o >= EV_MIN and _stake(p, o) >= 100:
+        if (o and 1 < o <= MAX_ODDS_TANSHO and p * o >= EV_MIN
+                and _stake(p, o) >= 100):
             bets.append(("単勝", str(lane), p, o))
 
-    s_odds = fetch_3tan_odds(jcd, rno, target)
     cands = []
-    for (a, b, c), p in harville(probs).items():
+    for (a, b, c), p in trifecta_probs(probs, lam2, lam3).items():
         o = s_odds.get((a, b, c))
-        if (o and o > 1 and p >= P_MIN_3TAN and p * o >= EV_MIN
-                and _stake(p, o) >= 100):
+        if (o and 1 < o <= MAX_ODDS_3TAN and p >= P_MIN_3TAN
+                and p * o >= EV_MIN and _stake(p, o) >= 100):
             cands.append(("３連単", f"{a}-{b}-{c}", p, o))
     cands.sort(key=lambda x: -(x[2] * x[3]))
     bets.extend(cands[:MAX_BETS_PER_RACE_3TAN])
     return bets
+
+
+def _select_bets(probs: dict[int, float], jcd: int, rno: int, target: str,
+                 lam2: float = 1.0, lam3: float = 1.0):
+    """締切直前オッズを取得してEVプラスの買い目を返す。"""
+    t_odds = fetch_tansho_odds(jcd, rno, target)
+    s_odds = fetch_3tan_odds(jcd, rno, target)
+    return select_from_odds(probs, t_odds, s_odds, lam2, lam3)
 
 
 def run(target: str | None = None) -> None:
@@ -92,7 +105,10 @@ def run(target: str | None = None) -> None:
 
     df = build_today(target)
     with open(MODEL_PATH, "rb") as f:
-        model = pickle.load(f)["model"]
+        bundle = pickle.load(f)
+    model = bundle["model"]
+    lam2 = bundle.get("lambda2", 1.0)
+    lam3 = bundle.get("lambda3", 1.0)
     for c in CATEGORICAL:
         df[c] = df[c].astype("category")
     df["p_raw"] = model.predict(df[FEATURES])
@@ -133,7 +149,8 @@ def run(target: str | None = None) -> None:
         for rid in due:
             v = pending.pop(rid)
             try:
-                bets = _select_bets(v["probs"], v["jcd"], v["rno"], target)
+                bets = _select_bets(v["probs"], v["jcd"], v["rno"], target,
+                                    lam2, lam3)
             except Exception as e:
                 print(f"NG {rid}: {e}", flush=True)
                 continue

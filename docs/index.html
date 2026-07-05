@@ -28,7 +28,7 @@
  <div class="cards" id="cards"></div>
  <section><h2>累積損益(仮想円)</h2><canvas id="equity" height="90"></canvas></section>
  <section><h2>式別成績</h2><table id="bytype"><thead><tr><th>式別</th><th>点数</th><th>的中率</th>
-  <th>ROI(ケリー)</th><th>ROI(均一100円)</th></tr></thead><tbody></tbody></table></section>
+  <th>ROI(ケリー)</th><th>ROI(均一100円)</th><th>CLV</th></tr></thead><tbody></tbody></table></section>
  <section><h2>EV帯別成績</h2><table id="byev"><thead><tr><th>EV帯</th><th>点数</th><th>的中率</th>
   <th>ROI(ケリー)</th><th>ROI(均一100円)</th></tr></thead><tbody></tbody></table></section>
  <section><h2>日別成績</h2><table id="daily"><thead><tr><th>日付</th><th>点数</th><th>的中率</th>
@@ -54,11 +54,13 @@ async function refresh(){
     ["ROI(ケリー配分)",roi(t.roi_kelly),t.roi_kelly==null?null:t.roi_kelly-1],
     ["ROI(均一100円)",roi(t.roi_flat100),t.roi_flat100==null?null:t.roi_flat100-1],
     ["損益(仮想円)",num(t.returned-t.staked),t.returned-t.staked],
+    ["平均CLV",t.clv==null?"-":(t.clv*100).toFixed(1)+"%",t.clv],
     ["未採点",num(s.unsettled)],
   ].map(([k,v,c])=>`<div class="card"><div class="k">${k}</div>
     <div class="v ${c==null?"":(c>=0?"pos":"neg")}">${v}</div></div>`).join("");
   fill("bytype",Object.entries(s.by_type).map(([k,a])=>
-    [k,a.bets,pct(a.hit_rate),roi(a.roi_kelly),roi(a.roi_flat100)]));
+    [k,a.bets,pct(a.hit_rate),roi(a.roi_kelly),roi(a.roi_flat100),
+     a.clv==null?"-":(a.clv*100).toFixed(1)+"%"]));
   fill("byev",Object.entries(s.by_ev).map(([k,a])=>
     [k,a.bets,pct(a.hit_rate),roi(a.roi_kelly),roi(a.roi_flat100)]));
   fill("daily",s.daily.map(d=>
